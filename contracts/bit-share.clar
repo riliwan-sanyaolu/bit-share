@@ -76,3 +76,78 @@
         expiry: uint,
     }
 )
+
+;; Governance proposals
+(define-map proposals
+    { proposal-id: uint }
+    {
+        title: (string-ascii 256),
+        asset-id: uint,
+        start-height: uint,
+        end-height: uint,
+        executed: bool,
+        votes-for: uint,
+        votes-against: uint,
+        minimum-votes: uint,
+    }
+)
+
+;; Voting registry
+(define-map votes
+    {
+        proposal-id: uint,
+        voter: principal,
+    }
+    { vote-amount: uint }
+)
+
+;; Dividend claim tracker
+(define-map dividend-claims
+    {
+        asset-id: uint,
+        claimer: principal,
+    }
+    { last-claimed-amount: uint }
+)
+
+;; Oracle price feeds
+(define-map price-feeds
+    { asset-id: uint }
+    {
+        price: uint,
+        decimals: uint,
+        last-updated: uint,
+        oracle: principal,
+    }
+)
+
+;; Input Validation Functions
+
+;; Validates that an asset value is within acceptable bounds
+(define-private (validate-asset-value (value uint))
+    (and
+        (>= value MIN-ASSET-VALUE)
+        (<= value MAX-ASSET-VALUE)
+    )
+)
+
+;; Validates that a governance proposal duration is within acceptable bounds
+(define-private (validate-duration (duration uint))
+    (and
+        (>= duration MIN-DURATION)
+        (<= duration MAX-DURATION)
+    )
+)
+
+;; Validates that a KYC level is within acceptable bounds
+(define-private (validate-kyc-level (level uint))
+    (<= level MAX-KYC-LEVEL)
+)
+
+;; Validates that an expiry block height is within acceptable bounds
+(define-private (validate-expiry (expiry uint))
+    (and
+        (> expiry stacks-block-height)
+        (<= (- expiry stacks-block-height) MAX-EXPIRY)
+    )
+)
