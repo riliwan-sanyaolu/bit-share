@@ -312,3 +312,59 @@
         )
     )
 )
+
+;; Read-Only Functions
+
+;; Gets information about an asset
+(define-read-only (get-asset-info (asset-id uint))
+    (map-get? assets { asset-id: asset-id })
+)
+
+;; Gets the balance of tokens for an owner of a given asset
+(define-read-only (get-balance
+        (owner principal)
+        (asset-id uint)
+    )
+    (default-to u0
+        (get balance
+            (map-get? token-balances {
+                owner: owner,
+                asset-id: asset-id,
+            })
+        ))
+)
+
+;; Gets information about a proposal
+(define-read-only (get-proposal (proposal-id uint))
+    (map-get? proposals { proposal-id: proposal-id })
+)
+
+;; Gets information about a vote cast by a voter on a proposal
+(define-read-only (get-vote
+        (proposal-id uint)
+        (voter principal)
+    )
+    (map-get? votes {
+        proposal-id: proposal-id,
+        voter: voter,
+    })
+)
+
+;; Gets the price feed information for an asset
+(define-read-only (get-price-feed (asset-id uint))
+    (map-get? price-feeds { asset-id: asset-id })
+)
+
+;; Gets the last claimed dividend amount for a user on an asset
+(define-read-only (get-last-claim
+        (asset-id uint)
+        (claimer principal)
+    )
+    (default-to u0
+        (get last-claimed-amount
+            (map-get? dividend-claims {
+                asset-id: asset-id,
+                claimer: claimer,
+            })
+        ))
+)
