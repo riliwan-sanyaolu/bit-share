@@ -151,3 +151,74 @@
         (<= (- expiry stacks-block-height) MAX-EXPIRY)
     )
 )
+
+;; Validates that a minimum vote count is reasonable
+(define-private (validate-minimum-votes (vote-count uint))
+    (and
+        (> vote-count u0)
+        (<= vote-count tokens-per-asset)
+    )
+)
+
+;; Validates that a metadata URI is valid
+(define-private (validate-metadata-uri (uri (string-ascii 256)))
+    (and
+        (> (len uri) u0)
+        (<= (len uri) u256)
+    )
+)
+
+;; Helper Functions
+
+;; Gets the next asset ID to be assigned
+(define-private (get-next-asset-id)
+    (default-to u1 (get-last-asset-id))
+)
+
+;; Gets the next proposal ID to be assigned
+(define-private (get-next-proposal-id)
+    (default-to u1 (get-last-proposal-id))
+)
+
+;; Gets the last asset ID that was assigned
+;; Note: This is a stub that should be implemented
+(define-private (get-last-asset-id)
+    none
+)
+
+;; Gets the last proposal ID that was assigned
+;; Note: This is a stub that should be implemented
+(define-private (get-last-proposal-id)
+    none
+)
+
+;; Asset Management Functions
+
+;; Registers a new asset with the protocol
+(define-public (register-asset
+        (metadata-uri (string-ascii 256))
+        (asset-value uint)
+    )
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (validate-metadata-uri metadata-uri) err-invalid-uri)
+        (asserts! (validate-asset-value asset-value) err-invalid-value)
+        (let ((asset-id (get-next-asset-id)))
+            (map-set assets { asset-id: asset-id } {
+                owner: contract-owner,
+                metadata-uri: metadata-uri,
+                asset-value: asset-value,
+                is-locked: false,
+                creation-height: stacks-block-height,
+                last-price-update: stacks-block-height,
+                total-dividends: u0,
+            })
+            (map-set token-balances {
+                owner: contract-owner,
+                asset-id: asset-id,
+            } { balance: tokens-per-asset }
+            )
+            (ok asset-id)
+        )
+    )
+)
