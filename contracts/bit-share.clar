@@ -30,6 +30,9 @@
 (define-constant err-invalid-votes (err u115))
 (define-constant err-invalid-address (err u116))
 (define-constant err-invalid-title (err u117))
+(define-constant err-insufficient-balance (err u118))
+(define-constant err-kyc-expired (err u119))
+(define-constant err-transfer-failed (err u120))
 
 ;; Configuration limits
 (define-constant MAX-ASSET-VALUE u1000000000000) ;; 1 trillion
@@ -41,6 +44,10 @@
 
 ;; SFTs per asset
 (define-constant tokens-per-asset u100000)
+
+;; Data Variables for ID tracking
+(define-data-var last-asset-id uint u0)
+(define-data-var last-proposal-id uint u0)
 
 ;; Data Maps
 
@@ -170,26 +177,41 @@
 
 ;; Helper Functions
 
-;; Gets the next asset ID to be assigned
+;; Gets the next asset ID to be assigned and increments the counter
 (define-private (get-next-asset-id)
-    (default-to u1 (get-last-asset-id))
+    (let ((next-id (+ (var-get last-asset-id) u1)))
+        (var-set last-asset-id next-id)
+        next-id
+    )
 )
 
-;; Gets the next proposal ID to be assigned
+;; Gets the next proposal ID to be assigned and increments the counter
 (define-private (get-next-proposal-id)
-    (default-to u1 (get-last-proposal-id))
+    (let ((next-id (+ (var-get last-proposal-id) u1)))
+        (var-set last-proposal-id next-id)
+        next-id
+    )
 )
 
 ;; Gets the last asset ID that was assigned
-;; Note: This is a stub that should be implemented
 (define-private (get-last-asset-id)
-    none
+    (some (var-get last-asset-id))
 )
 
 ;; Gets the last proposal ID that was assigned
-;; Note: This is a stub that should be implemented
 (define-private (get-last-proposal-id)
-    none
+    (some (var-get last-proposal-id))
+)
+
+;; Checks if a user has valid KYC status
+(define-private (is-kyc-valid (user principal))
+    (match (map-get? kyc-status { address: user })
+        kyc-info (and 
+            (get is-approved kyc-info)
+            (> (get expiry kyc-info) stacks-block-height)
+        )
+        false
+    )
 )
 
 ;; Asset Management Functions
@@ -223,7 +245,112 @@
     )
 )
 
+;; Transfers tokens from one user to another
+(define-public (transfer-tokens
+        (asset-id uint)
+        (amount uint)
+        (recipient principal)
+    )
+    (let (
+            (sender-balance (get-balance tx-sender asset-id))
+            (recipient-balance (get-balance recipient asset-id))
+        )
+        (begin
+            (asserts! (is-some (get-asset-info asset-id)) err-not-found)
+            (asserts! (>= sender-balance amount) err-insufficient-balance)
+            (asserts! (> amount u0) err-invalid-amount)
+            (asserts! (is-kyc-valid tx-sender) err-kyc-required)
+            (asserts! (is-kyc-valid recipient) err-kyc-required)
+            
+            ;; Update sender balance
+            (map-set token-balances {
+                owner: tx-sender,
+                asset-id: asset-id,
+            } { balance: (- sender-balance amount) })
+            
+            ;; Update recipient balance
+            (map-set token-balances {
+                owner: recipient,
+                asset-id: asset-id,
+            } { balance: (+ recipient-balance amount) })
+            
+            (ok true)
+        )
+    )
+)
+
+;; KYC Management Functions
+
+;; Approves KYC status for a user
+(define-public (approve-kyc
+        (user principal)
+        (level uint)
+        (expiry uint)
+    )
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (validate-kyc-level level) err-invalid-kyc-level)
+        (asserts! (validate-expiry expiry) err-invalid-expiry)
+        (ok (map-set kyc-status { address: user } {
+            is-approved: true,
+            level: level,
+            expiry: expiry,
+        }))
+    )
+)
+
+;; Revokes KYC status for a user
+(define-public (revoke-kyc (user principal))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (ok (map-set kyc-status { address: user } {
+            is-approved: false,
+            level: u0,
+            expiry: u0,
+        }))
+    )
+)
+
+;; Oracle Functions
+
+;; Updates price feed for an asset (only owner can call)
+(define-public (update-price-feed
+        (asset-id uint)
+        (price uint)
+        (decimals uint)
+    )
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (is-some (get-asset-info asset-id)) err-not-found)
+        (asserts! (> price u0) err-invalid-value)
+        (ok (map-set price-feeds { asset-id: asset-id } {
+            price: price,
+            decimals: decimals,
+            last-updated: stacks-block-height,
+            oracle: tx-sender,
+        }))
+    )
+)
+
 ;; Dividend Functions
+
+;; Distributes dividends to an asset (only owner can call)
+(define-public (distribute-dividends
+        (asset-id uint)
+        (dividend-amount uint)
+    )
+    (let ((asset (unwrap! (get-asset-info asset-id) err-not-found)))
+        (begin
+            (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+            (asserts! (> dividend-amount u0) err-invalid-amount)
+            (ok (map-set assets { asset-id: asset-id }
+                (merge asset {
+                    total-dividends: (+ (get total-dividends asset) dividend-amount)
+                })
+            ))
+        )
+    )
+)
 
 ;; Claims available dividends for a given asset
 (define-public (claim-dividends (asset-id uint))
@@ -234,13 +361,15 @@
             (total-dividends (get total-dividends asset))
             (claimable-amount (/ (* balance (- total-dividends last-claim)) tokens-per-asset))
         )
-        (asserts! (> claimable-amount u0) err-invalid-amount)
-        (asserts! (is-some (get-asset-info asset-id)) err-not-found)
-        (ok (map-set dividend-claims {
-            asset-id: asset-id,
-            claimer: tx-sender,
-        } { last-claimed-amount: total-dividends }
-        ))
+        (begin
+            (asserts! (> claimable-amount u0) err-invalid-amount)
+            (asserts! (> balance u0) err-insufficient-balance)
+            (map-set dividend-claims {
+                asset-id: asset-id,
+                claimer: tx-sender,
+            } { last-claimed-amount: total-dividends })
+            (ok claimable-amount)
+        )
     )
 )
 
@@ -254,14 +383,16 @@
         (minimum-votes uint)
     )
     (begin
+        (asserts! (is-some (get-asset-info asset-id)) err-not-found)
         (asserts! (validate-duration duration) err-invalid-duration)
         (asserts! (validate-minimum-votes minimum-votes) err-invalid-votes)
         (asserts! (validate-metadata-uri title) err-invalid-title)
         (asserts! (>= (get-balance tx-sender asset-id) (/ tokens-per-asset u10))
             err-not-authorized
         )
+        (asserts! (is-kyc-valid tx-sender) err-kyc-required)
         (let ((proposal-id (get-next-proposal-id)))
-            (ok (map-set proposals { proposal-id: proposal-id } {
+            (map-set proposals { proposal-id: proposal-id } {
                 title: title,
                 asset-id: asset-id,
                 start-height: stacks-block-height,
@@ -270,7 +401,8 @@
                 votes-for: u0,
                 votes-against: u0,
                 minimum-votes: minimum-votes,
-            }))
+            })
+            (ok proposal-id)
         )
     )
 )
@@ -287,17 +419,20 @@
             (balance (get-balance tx-sender asset-id))
         )
         (begin
-            (asserts! (>= balance amount) err-invalid-amount)
+            (asserts! (>= balance amount) err-insufficient-balance)
+            (asserts! (> amount u0) err-invalid-amount)
             (asserts! (< stacks-block-height (get end-height proposal))
                 err-vote-ended
             )
             (asserts! (is-none (get-vote proposal-id tx-sender)) err-vote-exists)
+            (asserts! (is-kyc-valid tx-sender) err-kyc-required)
+            
             (map-set votes {
                 proposal-id: proposal-id,
                 voter: tx-sender,
-            } { vote-amount: amount }
-            )
-            (ok (map-set proposals { proposal-id: proposal-id }
+            } { vote-amount: amount })
+            
+            (map-set proposals { proposal-id: proposal-id }
                 (merge proposal {
                     votes-for: (if vote-for
                         (+ (get votes-for proposal) amount)
@@ -308,7 +443,26 @@
                         (+ (get votes-against proposal) amount)
                     ),
                 })
-            ))
+            )
+            (ok true)
+        )
+    )
+)
+
+;; Executes a governance proposal if it has passed
+(define-public (execute-proposal (proposal-id uint))
+    (let ((proposal (unwrap! (get-proposal proposal-id) err-not-found)))
+        (begin
+            (asserts! (>= stacks-block-height (get end-height proposal)) err-vote-ended)
+            (asserts! (not (get executed proposal)) err-already-listed)
+            (asserts! (>= (+ (get votes-for proposal) (get votes-against proposal)) 
+                         (get minimum-votes proposal)) err-invalid-votes)
+            (asserts! (> (get votes-for proposal) (get votes-against proposal)) err-not-authorized)
+            
+            (map-set proposals { proposal-id: proposal-id }
+                (merge proposal { executed: true })
+            )
+            (ok true)
         )
     )
 )
@@ -367,4 +521,32 @@
                 claimer: claimer,
             })
         ))
+)
+
+;; Gets KYC status for a user
+(define-read-only (get-kyc-status (user principal))
+    (map-get? kyc-status { address: user })
+)
+
+;; Gets the current asset counter
+(define-read-only (get-total-assets)
+    (var-get last-asset-id)
+)
+
+;; Gets the current proposal counter
+(define-read-only (get-total-proposals)
+    (var-get last-proposal-id)
+)
+
+;; Checks if a proposal has passed
+(define-read-only (has-proposal-passed (proposal-id uint))
+    (match (get-proposal proposal-id)
+        proposal (and
+            (>= stacks-block-height (get end-height proposal))
+            (>= (+ (get votes-for proposal) (get votes-against proposal)) 
+                (get minimum-votes proposal))
+            (> (get votes-for proposal) (get votes-against proposal))
+        )
+        false
+    )
 )
